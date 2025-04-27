@@ -2,184 +2,225 @@ import cv2 # type: ignore
 import mediapipe as mp # type: ignore
 import pyautogui
 import numpy as np
-import time # Para calcular FPS (opcional)
+import time # Para calcular FPS y deltaTime
 import math # Para calcular la distancia
 
 # --- Configuración Inicial ---
-wCam, hCam = 640, 480 # Ancho y alto de la ventana de la cámara
+wCam, hCam = 640, 480
+wScreen, hScreen = pyautogui.size()
+frameR_margin = 100 # Reducir área activa/sensibilidad (más margen)
+smoothening = 10    # Factor de suavizado (un poco menos puede sentirse más responsivo)
+click_threshold = 40 # Sensibilidad de clic (ajustar según necesidad)
+is_clicking = False
 
-# Área de la pantalla utilizable en la cámara (para evitar llegar a los bordes)
-# Un valor MENOR en frameR_margin aumenta el área activa y la sensibilidad del mouse (más velocidad).
-# Ajustado para mayor velocidad/sensibilidad
-frameR_margin = 60 # Reducción del marco (pixeles desde cada borde) - Disminuido para más velocidad
+# --- Variables para Extrapolación y Re-anclaje ---
+pTime = time.time() # Tiempo anterior
+plocX, plocY = 0, 0 # Ubicación anterior del cursor (suavizada)
+clocX, clocY = 0, 0 # Ubicación actual del cursor (suavizada)
+velX, velY = 0, 0  # Velocidad actual estimada del cursor (pixels por frame)
+decay_factor = 0.90 # Factor de reducción de velocidad por frame
+extrapolation_threshold = 0.5 # Velocidad mínima para seguir extrapolando
 
-# Factor de suavizado para el movimiento del cursor. Mayor valor = más suave pero más lento.
-# Aumentado para más precisión (menos temblor)
-smoothening = 10 # Factor de suavizado aumentado
+# --- Variables de Estado para Re-anclaje ---
+hand_was_detected_prev_frame = False # Para detectar la transición de no detectado a detectado
+offset_calculated = False           # Flag para saber si ya calculamos el offset en esta aparición
+offsetX, offsetY = 0, 0             # El offset a aplicar
 
-pTime = 0 # Tiempo anterior para cálculo de FPS
-plocX, plocY = 0, 0 # Ubicación anterior del cursor (para suavizado)
-clocX, clocY = 0, 0 # Ubicación actual del cursor (para suavizado)
-
-# Sensibilidad del clic (distancia entre pulgar e índice)
-# Ajusta este valor. Un valor más bajo requiere que los dedos estén más juntos para hacer clic.
-click_threshold = 40 # Distancia en pixeles, ajustar según necesidad
-
-# Variable para controlar el estado del clic (evitar clics múltiples)
-is_clicking = False # Inicialmente no estamos haciendo clic
-
-# Inicializar Cámara
-cap = cv2.VideoCapture(0) # 0 suele ser la cámara web integrada
+# --- Inicialización ---
+cap = cv2.VideoCapture(0)
 if not cap.isOpened():
-    print("Error: No se pudo abrir la cámara.")
-    # Intenta con otro índice si el 0 falla
-    print("Intentando con índice 1...")
+    print("Error: No se pudo abrir la cámara 0. Intentando con índice 1...")
     cap = cv2.VideoCapture(1)
-    time.sleep(1) # Espera un poco
+    time.sleep(1)
     if not cap.isOpened():
         print("Error: No se pudo abrir la cámara con índice 1 tampoco.")
-        print("Por favor, verifica si la cámara está conectada, no está en uso por otra aplicación y los drivers están instalados.")
-        exit() # Sale si no se abre con 0 ni 1
+        exit()
 
-cap.set(3, wCam) # Establecer ancho
-cap.set(4, hCam) # Establecer alto
+cap.set(3, wCam)
+cap.set(4, hCam)
 
-# Inicializar Mediapipe Hands
 mpHands = mp.solutions.hands
-# Parámetros: static_image_mode=False (para video), max_num_hands=1 (detectar solo una mano),
-# min_detection_confidence=0.7 (confianza mínima para detectar), min_tracking_confidence=0.5 (confianza mínima para seguir)
-hands = mpHands.Hands(max_num_hands=1, min_detection_confidence=0.7)
-mpDraw = mp.solutions.drawing_utils # Utilidad para dibujar landmarks
-
-# Obtener dimensiones de la pantalla
-wScreen, hScreen = pyautogui.size()
-# print(f"Resolución de pantalla: {wScreen}x{hScreen}")
+# Aumentar un poco la confianza de detección puede ayudar a evitar detecciones falsas
+hands = mpHands.Hands(max_num_hands=1, min_detection_confidence=0.75, min_tracking_confidence=0.5)
+mpDraw = mp.solutions.drawing_utils
 
 # --- Bucle Principal ---
 try:
     while True:
-        # 1. Leer un fotograma de la cámara
+        # 1. Leer fotograma y calcular tiempo delta
         success, img = cap.read()
+        img = cv2.flip(img, 1) # Voltear horizontalmente para modo espejo
+        cTime = time.time()
+        deltaTime = cTime - pTime if pTime else 0.01 # Evitar división por cero al inicio
+        pTime = cTime
         if not success:
-            print("Ignorando fotograma vacío de la cámara.")
+            print("Ignorando fotograma vacío.")
             continue
 
-        # No volteamos la imagen para que el movimiento del mouse sea directo
-        # img = cv2.flip(img, 1) # Esta línea está comentada/eliminada
-
-        # 2. Convertir la imagen a RGB (Mediapipe usa RGB)
+        # 2. Procesar la imagen
         imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-        # 3. Procesar la imagen para detectar manos
+        imgRGB.flags.writeable = False # Optimización: Marcar como no escribible antes de procesar
         results = hands.process(imgRGB)
+        imgRGB.flags.writeable = True # Volver a marcar como escribible
 
-        # Lista para almacenar coordenadas de landmarks importantes
-        lmList = []
+        hand_detected_this_frame = bool(results.multi_hand_landmarks) # True si se detectó mano
 
-        # 4. Si se detectan manos (landmarks)
-        if results.multi_hand_landmarks:
-            for handLms in results.multi_hand_landmarks: # Iterar sobre las manos detectadas (aunque configuramos para 1)
+        # --- Área Activa Visual ---
+        active_x_start = frameR_margin
+        active_x_end = wCam - frameR_margin
+        active_y_start = frameR_margin
+        active_y_end = hCam - frameR_margin
+        cv2.rectangle(img, (active_x_start, active_y_start), (active_x_end, active_y_end), (255, 0, 255), 2)
 
-                # --- Control de Movimiento y Clic ---
-                # Obtener coordenadas de landmarks específicos
-                for id, lm in enumerate(handLms.landmark):
-                    # lm.x, lm.y son coordenadas normalizadas (0 a 1). Convertirlas a píxeles.
-                    h, w, c = img.shape
-                    cx, cy = int(lm.x * w), int(lm.y * h)
-                    lmList.append([id, cx, cy])
+        # 3. Lógica Principal: Detección / Extrapolación / Re-anclaje
+        if hand_detected_this_frame:
+            handLms = results.multi_hand_landmarks[0] # Asumimos una sola mano
+            lmList = []
+            for id, lm in enumerate(handLms.landmark):
+                h, w, c = img.shape
+                cx, cy = int(lm.x * w), int(lm.y * h)
+                lmList.append([id, cx, cy])
 
-                    # Dibujar landmarks (opcional, para visualización)
-                    # mpDraw.draw_landmarks(img, handLms, mpHands.HAND_CONNECTIONS) # Dibuja todos
+            if len(lmList) >= 9: # Necesitamos al menos índice (8) y pulgar (4)
+                x1, y1 = lmList[8][1], lmList[8][2] # Índice
+                x2, y2 = lmList[4][1], lmList[4][2] # Pulgar
 
-                if len(lmList) != 0:
-                    # Obtener coordenadas de la punta del dedo índice (landmark 8) - Para movimiento y clic
-                    x1, y1 = lmList[8][1], lmList[8][2]
-                    # Obtener coordenadas de la punta del pulgar (landmark 4) - Para clic
-                    x2, y2 = lmList[4][1], lmList[4][2]
+                # --- Dibujo de Referencia ---
+                cv2.circle(img, (x1, y1), 10, (255, 0, 255), cv2.FILLED) # Índice
+                cv2.circle(img, (x2, y2), 10, (0, 255, 0), cv2.FILLED) # Pulgar (cambié color para diferenciar)
 
-                    # Dibujar círculos en las puntas del índice y pulgar (feedback visual)
-                    cv2.circle(img, (x1, y1), 10, (255, 0, 255), cv2.FILLED) # Índice (morado)
-                    cv2.circle(img, (x2, y2), 10, (255, 0, 0), cv2.FILLED)   # Pulgar (azul)
-                    cv2.line(img, (x1, y1), (x2, y2), (255, 0, 0), 3) # Línea entre índice y pulgar
+                # --- Calcular Posición Objetivo Cruda (sin offset aún) ---
+                # Invertimos X porque la imagen está volteada (flip)
+                screenX_raw = int(np.interp(x1, (active_x_start, active_x_end), (0, wScreen)))
+                screenY_raw = int(np.interp(y1, (active_y_start, active_y_end), (0, hScreen)))
+
+                # --- LÓGICA DE RE-ANCLAJE ---
+                # Si la mano acaba de aparecer (no estaba en el frame anterior)
+                if not hand_was_detected_prev_frame:
+                    # Calcular el offset entre dónde aparecería el cursor (raw)
+                    # y dónde está realmente ahora (después de la extrapolación/última posición)
+                    offsetX = screenX_raw - clocX
+                    offsetY = screenY_raw - clocY
+                    offset_calculated = True
+                    print(f"Mano reaparecida. Offset calculado: ({offsetX}, {offsetY})")
+
+                # Aplicar el offset si fue calculado para esta aparición
+                if offset_calculated:
+                    screenX = screenX_raw - offsetX
+                    screenY = screenY_raw - offsetY
+                else:
+                    # Esto no debería pasar si la lógica es correcta, pero como fallback:
+                    screenX = screenX_raw
+                    screenY = screenY_raw
+                    if not hand_was_detected_prev_frame: # Asegurar cálculo si se saltó la primera vez
+                        offsetX = screenX_raw - clocX
+                        offsetY = screenY_raw - clocY
+                        offset_calculated = True
 
 
-                    # 5. Mapear coordenadas de la cámara a la pantalla
-                    # Definir un área activa en la cámara usando frameR_margin
-                    active_x_start = frameR_margin
-                    active_x_end = wCam - frameR_margin
-                    active_y_start = frameR_margin
-                    active_y_end = hCam - frameR_margin
+                # --- Suavizado ---
+                # clocX/Y ahora SÍ representan la posición suavizada deseada
+                clocX = plocX + (screenX - plocX) / smoothening
+                clocY = plocY + (screenY - plocY) / smoothening
 
-                    # Dibujar el área activa en la ventana de la cámara
-                    cv2.rectangle(img, (active_x_start, active_y_start), (active_x_end, active_y_end), (255, 0, 255), 2)
 
-                    # Asegurarse que el dedo índice esté dentro del área activa para mapear
-                    if active_x_start <= x1 <= active_x_end and active_y_start <= y1 <= active_y_end:
+                # --- Calcular Velocidad (para posible futura extrapolación) ---
+                # Usamos el cambio en la posición suavizada
+                if deltaTime > 0.001:
+                    velX = (clocX - plocX) # Pixels por frame (aprox)
+                    velY = (clocY - plocY)
+                else:
+                    velX = 0
+                    velY = 0
 
-                        # Mapeo lineal de las coordenadas del índice dentro del área activa a la pantalla completa
-                        # Invertimos el rango de salida para la coordenada X para movimiento directo
-                        screenX = int(np.interp(x1, (active_x_start, active_x_end), (wScreen, 0))) # Rango de salida invertido
-                        screenY = int(np.interp(y1, (active_y_start, active_y_end), (0, hScreen)))
+                # --- Mover el Mouse ---
+                try:
+                    # Asegurarse que las coordenadas estén dentro de la pantalla antes de mover
+                    move_x = max(0, min(wScreen - 1, int(clocX)))
+                    move_y = max(0, min(hScreen - 1, int(clocY)))
+                    pyautogui.moveTo(move_x, move_y)
+                except pyautogui.FailSafeException:
+                    print("FailSafe activado.")
+                    velX, velY = 0, 0 # Detener si salta el failsafe
 
-                        # 6. Suavizar el movimiento
-                        clocX = plocX + (screenX - plocX) / smoothening
-                        clocY = plocY + (screenY - plocY) / smoothening
 
-                        # 7. Mover el mouse (usando coordenadas suavizadas)
-                        # PyAutoGUI puede fallar si intenta mover a (0,0) o extremos a veces, añadir un pequeño control
+                # --- Detección de Clic ---
+                length = math.hypot(x2 - x1, y2 - y1)
+                cv2.line(img, (x1, y1), (x2, y2), (0, 255, 0) if length < click_threshold else (255, 0, 0), 3) # Línea cambia color al click
+                if length < click_threshold:
+                    if not is_clicking:
+                        cv2.circle(img, (x1, y1), 15, (0, 255, 0), cv2.FILLED) # Feedback visual clic
                         try:
-                            # Movimiento directo (usamos las coordenadas suavizadas tal cual)
-                            pyautogui.moveTo(clocX, clocY)
-                        except pyautogui.FailSafeException:
-                             print("FailSafe activado (cursor en esquina superior izquierda).")
-
-                        plocX, plocY = clocX, clocY # Actualizar ubicación anterior
-
-
-                        # --- Detección de Clic ---
-                        # 8. Calcular distancia entre punta del índice (8) y punta del pulgar (4)
-                        length = math.hypot(x2 - x1, y2 - y1) # Distancia Índice (8) - Pulgar (4)
-
-                        # 9. Si la distancia es corta Y NO estamos ya haciendo clic, simular clic izquierdo
-                        if length < click_threshold and not is_clicking:
-                            cv2.circle(img, (x1, y1), 15, (0, 255, 0), cv2.FILLED) # Círculo verde al hacer clic
-                            # Simular clic izquierdo
                             pyautogui.click()
                             print("¡Click!")
-                            is_clicking = True # Establecer el estado a True porque acabamos de hacer clic
-                            # Pequeña pausa para evitar clics múltiples muy rápidos (opcional con el estado)
-                            # time.sleep(0.2) # Puedes ajustar o eliminar si el estado es suficiente
+                            is_clicking = True # Evitar clicks múltiples por mantener la posición
+                            velX, velY = 0, 0 # Detener extrapolación al hacer clic
+                        except pyautogui.FailSafeException:
+                             print("FailSafe activado durante el clic.")
+                else:
+                    is_clicking = False # Resetear estado de clic
 
-                        # 10. Si la distancia es larga Y estábamos haciendo clic, resetear el estado
-                        if length > click_threshold:
-                             is_clicking = False # Restablecer el estado para permitir un nuevo clic
+                # Actualizar posición previa para el siguiente frame
+                plocX, plocY = clocX, clocY
 
+        else:
+            # --- Mano NO Detectada (Extrapolación) ---
+            offset_calculated = False # Reseteamos el flag de offset si la mano desaparece
+            if abs(velX) > extrapolation_threshold or abs(velY) > extrapolation_threshold:
+                # Aplicar decaimiento (fricción)
+                velX *= decay_factor
+                velY *= decay_factor
 
-        # --- Visualización (Opcional) ---
-        # Calcular y mostrar FPS
-        cTime = time.time()
-        fps = 1 / (cTime - pTime)
-        pTime = cTime
-        cv2.putText(img, f'FPS: {int(fps)}', (wCam - 150, 30), cv2.FONT_HERSHEY_PLAIN, 2, (255, 0, 0), 2) # Mostrar FPS arriba a la derecha
+                # Actualizar posición extrapolada
+                extrapolatedX = clocX + velX
+                extrapolatedY = clocY + velY
 
-        # Añadir leyenda "NoMouse App" arriba a la izquierda
-        cv2.putText(img, "NoMouse App", (10, 30), cv2.FONT_HERSHEY_PLAIN, 2, (255, 255, 255), 2)
+                # Asegurarse de que el cursor permanezca dentro de la pantalla
+                clocX = max(0, min(wScreen - 1, extrapolatedX))
+                clocY = max(0, min(hScreen - 1, extrapolatedY))
 
-        # Añadir leyenda "Presiona 'q' para salir" abajo
-        cv2.putText(img, "Presiona 'q' para salir", (10, hCam - 20), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 0, 255), 2)
+                # Mover el mouse a la posición extrapolada
+                try:
+                    pyautogui.moveTo(int(clocX), int(clocY))
+                    # Indicar visualmente que se está extrapolando
+                    cv2.putText(img, "Extrapolando...", (wCam // 2 - 100, hCam - 40), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 255, 255), 2)
+                except pyautogui.FailSafeException:
+                    print("FailSafe activado durante extrapolación.")
+                    velX, velY = 0, 0 # Detener si salta el failsafe
 
+                # Actualizar la posición 'previa' para el siguiente paso
+                plocX, plocY = clocX, clocY
 
-        # Mostrar la imagen procesada
-        cv2.imshow("NoMouse App", img) # Cambiamos el titulo de la ventana
+            else:
+                # La velocidad es muy baja, detener completamente la extrapolación
+                velX = 0
+                velY = 0
+                # No movemos el mouse si no hay velocidad
+
+        # --- Actualizar estado para el próximo frame ---
+        hand_was_detected_prev_frame = hand_detected_this_frame
+
+        # --- Visualización (FPS, etc.) ---
+        fps = 1 / deltaTime if deltaTime > 0 else 0
+        cv2.putText(img, f'FPS: {int(fps)}', (20, 50), cv2.FONT_HERSHEY_PLAIN, 2, (255, 0, 0), 2)
+        # cv2.putText(img, f'Vel: ({velX:.1f}, {velY:.1f})', (20, 80), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 0, 255), 2) # Opcional: mostrar velocidad
+        cv2.putText(img, "Presiona 'q' para salir", (20, hCam - 20), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 0, 255), 2)
+
+        # Mostrar la imagen
+        cv2.imshow("NoMouse App", img)
 
         # --- Salir ---
-        # Salir del bucle si se presiona 'q'
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
 finally:
     # --- Limpieza ---
     print("\nCerrando aplicación...")
-    cap.release() # Liberar la cámara
-    cv2.destroyAllWindows() # Cerrar todas las ventanas de OpenCV
-    hands.close() # Cerrar el objeto Hands de MediaPipe
+    if cap.isOpened():
+        cap.release()
+    cv2.destroyAllWindows()
+    if 'hands' in locals() and hands:
+       # La documentación de MediaPipe no indica explícitamente un método close()
+       # para la solución Hands en Python. La limpieza principal es liberar la cámara
+       # y destruir las ventanas de OpenCV.
+       pass
