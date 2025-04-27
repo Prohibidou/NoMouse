@@ -41,7 +41,7 @@ while True:
         continue
 
     # Voltear la imagen horizontalmente para efecto espejo
-    img = cv2.flip(img, 1)
+   # img = cv2.flip(img, 1)
 
     # 2. Convertir la imagen a RGB (Mediapipe usa RGB)
     imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
