@@ -8,8 +8,14 @@ import math # Para calcular la distancia
 # --- Configuración Inicial ---
 wCam, hCam = 640, 480
 wScreen, hScreen = pyautogui.size()
-frameR_margin = 100 # Reducir área activa/sensibilidad (más margen)
-smoothening = 10    # Factor de suavizado (un poco menos puede sentirse más responsivo)
+
+# --- AJUSTES REALIZADOS ---
+# 1. Reducir el margen para AGRANDAR el recuadro rosa (área activa visual)
+frameR_margin = 50 # Valor anterior: 100. Un valor menor hace el recuadro más grande.
+# 2. Reducir el suavizado para AUMENTAR la velocidad/respuesta del cursor
+smoothening = 5     # Valor anterior: 10. Un valor menor hace que el cursor reaccione más rápido.
+# --- FIN DE AJUSTES ---
+
 click_threshold = 40 # Sensibilidad de clic (ajustar según necesidad)
 is_clicking = False
 
@@ -17,14 +23,14 @@ is_clicking = False
 pTime = time.time() # Tiempo anterior
 plocX, plocY = 0, 0 # Ubicación anterior del cursor (suavizada)
 clocX, clocY = 0, 0 # Ubicación actual del cursor (suavizada)
-velX, velY = 0, 0  # Velocidad actual estimada del cursor (pixels por frame)
+velX, velY = 0, 0   # Velocidad actual estimada del cursor (pixels por frame)
 decay_factor = 0.90 # Factor de reducción de velocidad por frame
 extrapolation_threshold = 0.5 # Velocidad mínima para seguir extrapolando
 
 # --- Variables de Estado para Re-anclaje ---
 hand_was_detected_prev_frame = False # Para detectar la transición de no detectado a detectado
-offset_calculated = False           # Flag para saber si ya calculamos el offset en esta aparición
-offsetX, offsetY = 0, 0             # El offset a aplicar
+offset_calculated = False            # Flag para saber si ya calculamos el offset en esta aparición
+offsetX, offsetY = 0, 0              # El offset a aplicar
 
 # --- Inicialización ---
 cap = cv2.VideoCapture(0)
@@ -66,10 +72,12 @@ try:
         hand_detected_this_frame = bool(results.multi_hand_landmarks) # True si se detectó mano
 
         # --- Área Activa Visual ---
+        # Usamos el frameR_margin ajustado para dibujar el recuadro
         active_x_start = frameR_margin
         active_x_end = wCam - frameR_margin
         active_y_start = frameR_margin
         active_y_end = hCam - frameR_margin
+        # Dibuja el rectángulo rosa (magenta) más grande ahora
         cv2.rectangle(img, (active_x_start, active_y_start), (active_x_end, active_y_end), (255, 0, 255), 2)
 
         # 3. Lógica Principal: Detección / Extrapolación / Re-anclaje
@@ -90,42 +98,43 @@ try:
                 cv2.circle(img, (x2, y2), 10, (0, 255, 0), cv2.FILLED) # Pulgar (cambié color para diferenciar)
 
                 # --- Calcular Posición Objetivo Cruda (sin offset aún) ---
-                # Invertimos X porque la imagen está volteada (flip)
+                # Usa el área activa más grande (menor margen) para la interpolación
                 screenX_raw = int(np.interp(x1, (active_x_start, active_x_end), (0, wScreen)))
                 screenY_raw = int(np.interp(y1, (active_y_start, active_y_end), (0, hScreen)))
 
                 # --- LÓGICA DE RE-ANCLAJE ---
-                # Si la mano acaba de aparecer (no estaba en el frame anterior)
                 if not hand_was_detected_prev_frame:
                     # Calcular el offset entre dónde aparecería el cursor (raw)
                     # y dónde está realmente ahora (después de la extrapolación/última posición)
                     offsetX = screenX_raw - clocX
                     offsetY = screenY_raw - clocY
                     offset_calculated = True
-                    print(f"Mano reaparecida. Offset calculado: ({offsetX}, {offsetY})")
+                    print(f"[{time.strftime('%H:%M:%S')}] - Mano reaparecida. Offset calculado: ({offsetX}, {offsetY})")
+
+                    # *** SOLUCIÓN: Resetear plocX/Y a la posición actual ANTES del primer suavizado ***
+                    plocX, plocY = clocX, clocY
+                    print(f"[{time.strftime('%H:%M:%S')}] - plocX/Y reseteado a clocX/Y: ({plocX:.2f}, {plocY:.2f})")
 
                 # Aplicar el offset si fue calculado para esta aparición
                 if offset_calculated:
                     screenX = screenX_raw - offsetX
                     screenY = screenY_raw - offsetY
                 else:
-                    # Esto no debería pasar si la lógica es correcta, pero como fallback:
+                    # Fallback
                     screenX = screenX_raw
                     screenY = screenY_raw
-                    if not hand_was_detected_prev_frame: # Asegurar cálculo si se saltó la primera vez
+                    if not hand_was_detected_prev_frame: # Doble check por si acaso
                         offsetX = screenX_raw - clocX
                         offsetY = screenY_raw - clocY
                         offset_calculated = True
-
+                        plocX, plocY = clocX, clocY
 
                 # --- Suavizado ---
-                # clocX/Y ahora SÍ representan la posición suavizada deseada
+                # Usa el smoothening ajustado (menor valor = más rápido)
                 clocX = plocX + (screenX - plocX) / smoothening
                 clocY = plocY + (screenY - plocY) / smoothening
 
-
                 # --- Calcular Velocidad (para posible futura extrapolación) ---
-                # Usamos el cambio en la posición suavizada
                 if deltaTime > 0.001:
                     velX = (clocX - plocX) # Pixels por frame (aprox)
                     velY = (clocY - plocY)
@@ -135,14 +144,12 @@ try:
 
                 # --- Mover el Mouse ---
                 try:
-                    # Asegurarse que las coordenadas estén dentro de la pantalla antes de mover
                     move_x = max(0, min(wScreen - 1, int(clocX)))
                     move_y = max(0, min(hScreen - 1, int(clocY)))
                     pyautogui.moveTo(move_x, move_y)
                 except pyautogui.FailSafeException:
                     print("FailSafe activado.")
                     velX, velY = 0, 0 # Detener si salta el failsafe
-
 
                 # --- Detección de Clic ---
                 length = math.hypot(x2 - x1, y2 - y1)
@@ -153,10 +160,10 @@ try:
                         try:
                             pyautogui.click()
                             print("¡Click!")
-                            is_clicking = True # Evitar clicks múltiples por mantener la posición
+                            is_clicking = True # Evitar clicks múltiples
                             velX, velY = 0, 0 # Detener extrapolación al hacer clic
                         except pyautogui.FailSafeException:
-                             print("FailSafe activado durante el clic.")
+                            print("FailSafe activado durante el clic.")
                 else:
                     is_clicking = False # Resetear estado de clic
 
@@ -182,7 +189,6 @@ try:
                 # Mover el mouse a la posición extrapolada
                 try:
                     pyautogui.moveTo(int(clocX), int(clocY))
-                    # Indicar visualmente que se está extrapolando
                     cv2.putText(img, "Extrapolando...", (wCam // 2 - 100, hCam - 40), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 255, 255), 2)
                 except pyautogui.FailSafeException:
                     print("FailSafe activado durante extrapolación.")
@@ -195,7 +201,6 @@ try:
                 # La velocidad es muy baja, detener completamente la extrapolación
                 velX = 0
                 velY = 0
-                # No movemos el mouse si no hay velocidad
 
         # --- Actualizar estado para el próximo frame ---
         hand_was_detected_prev_frame = hand_detected_this_frame
@@ -203,7 +208,6 @@ try:
         # --- Visualización (FPS, etc.) ---
         fps = 1 / deltaTime if deltaTime > 0 else 0
         cv2.putText(img, f'FPS: {int(fps)}', (20, 50), cv2.FONT_HERSHEY_PLAIN, 2, (255, 0, 0), 2)
-        # cv2.putText(img, f'Vel: ({velX:.1f}, {velY:.1f})', (20, 80), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 0, 255), 2) # Opcional: mostrar velocidad
         cv2.putText(img, "Presiona 'q' para salir", (20, hCam - 20), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 0, 255), 2)
 
         # Mostrar la imagen
@@ -220,7 +224,4 @@ finally:
         cap.release()
     cv2.destroyAllWindows()
     if 'hands' in locals() and hands:
-       # La documentación de MediaPipe no indica explícitamente un método close()
-       # para la solución Hands en Python. La limpieza principal es liberar la cámara
-       # y destruir las ventanas de OpenCV.
-       pass
+        pass # No hay método close() explícito para Hands en MediaPipe
