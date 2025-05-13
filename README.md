@@ -1,49 +1,49 @@
 System Goal
+This system lets you use your computer without touching it, using just your hand.
 
-This system will let u use your computer without touching it
+How to install it?
 
+Required Environment:
 
-Cómo instalarlo ? 
+Python: Python 3.10 (make sure you install the 64-bit installer; when installing Python, enable “Add to PATH”).
 
-Entorno Necesario:
+pip: Included with Python.
 
-Python: Python 3.10 (asegúrate de que el instalador de 64 bits esté instalado, cuando instales Python activa el PATH en el instalador).
-pip: Incluido con Python.
-Entorno Virtual (venv): Lo crearemos.
-Bibliotecas: opencv-python, mediapipe, pyautogui, numpy
+Virtual Environment (venv): We will create one.
 
-Verifica/Instala Python 3.10 (o 3.11):
+Libraries: opencv-python, mediapipe, pyautogui, numpy
 
-Abre Git Bash.
-Escribe python --version o py --version. Deberías ver la versión 3.10.x o 3.11.x.
+Verify/Install Python 3.10 (or 3.11):
 
-Ve a la carpeta que has creado para el proyecto, abre esa dirección de la carpeta en Git Bash. 
+Open Git Bash.
 
-# Asegúrate de que 'python' o 'py -3.10' apunte a la versión correcta
+Run:
+
+python --version
+# or
+py --version
+You should see version 3.10.x or 3.11.x.
+
+Navigate to your project folder in Git Bash.
+Make sure that python (or py -3.10) points to the correct version.
+
+Create the virtual environment:
+
 python -m venv .venv
-Esto creará la carpeta .venv con la estructura necesaria para Windows (incluyendo la subcarpeta Scripts).
+This creates a folder named .venv with the necessary structure for Windows (including the Scripts subfolder).
 
-
-Activa el Entorno Virtual (¡El paso clave diferente para Git Bash!):
-
-En Git Bash, para activar un entorno virtual creado en Windows, usas el comando source y apuntas al script activate dentro de la carpeta Scripts, usando barras /:
-Bash
+Activate the virtual environment (key step for Git Bash!):
+In Git Bash, use the source command and point to the activate script inside Scripts, using forward slashes:
 
 source .venv/Scripts/activate
+Install the required libraries:
 
 
 pip install opencv-python mediapipe pyautogui numpy
+You are now ready to develop your project.
+Reminder: Each time you open Git Bash to work on this project, navigate to the ControlMouseMano folder and activate the virtual environment with:
 
-
-
-
-Ahora estás listo para desarrollar tu proyecto. Recuerda, cada vez que abras Git Bash para trabajar en este proyecto, navega a la carpeta ControlMouseMano y activa el entorno usando:
-
-Bash
 
 source .venv/Scripts/activate
-
-
-
 
 
